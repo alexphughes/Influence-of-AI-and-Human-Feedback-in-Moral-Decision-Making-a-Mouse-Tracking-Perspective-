@@ -1,0 +1,256 @@
+---
+title: "Perception&Action_Analysis"
+author: "Alex Presa Hughes"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r, include=FALSE}
+
+# Install and load relevant packages
+
+library(tidyverse)
+library(lme4)
+
+```
+
+```{r}
+
+df <- read_csv("C:/Users/Alex Presa Hughes/Downloads/COGSCI24/Cog_Sci_Projects/data/Perception_Action_Data_New.csv")
+dim(df)
+names(df)
+
+mean(df$Age)
+sd(df$Age)
+table(df$Gender)
+
+```
+H.1.0: There will be no difference in attack responses among trial types. 
+
+H.1.1: There will be a difference in responses in control, aggressive and conservative AI trials. Specifically, aggressive AI trials will elicit higher attack rates, followed by control, and finally conservative AI. 
+```{r}
+
+df <- df %>%
+  filter(!(RT_1 == 5 | RT_2 == 5))
+
+# Checking if RT is normally distributed
+
+shapiro.test(df$RT_1)
+shapiro.test(df$RT_2)
+
+# It is not normally distributed.
+
+# I will standardize the reaction times (RT)
+
+df <- df %>%
+  group_by(ID) %>%
+  mutate(std_RT_1 = (RT_1 - mean(RT_1))/sd(RT_1))
+
+df <- df %>%
+  group_by(ID) %>%
+  mutate(std_RT_2 = (RT_2 - mean(RT_2))/sd(RT_2))
+
+df <- df %>%
+  mutate(
+    Choice_1 = ifelse(Choice_1 == "Attack", 1, 0),
+    Choice_2 = ifelse(Choice_2 == "Attack", 1, 0))
+
+attack_rates <- df %>%
+  group_by(Condition_Name) %>%
+  summarise(
+    total_trials = n(),
+    attack_count = sum(Choice_2 == 1, na.rm = TRUE),
+    attack_rate = mean(Choice_2, na.rm = TRUE) * 100
+  )
+
+attack_rates$se <- sqrt(attack_rates$attack_rate * (100 - attack_rates$attack_rate) / attack_rates$total_trials)
+
+# Plot
+ggplot(attack_rates, aes(x = Condition_Name, y = attack_rate)) +
+  geom_col(fill = "steelblue") +
+  geom_errorbar(aes(ymin = attack_rate - se, ymax = attack_rate + se), width = 0.2) +
+  labs(title = "Attack Rates by AI Condition", x = "Condition", y = "Attack Rate (%)") +
+  theme_minimal()
+
+print(attack_rates$attack_rate)
+
+df <- df %>%
+  mutate(Condition = factor(Condition,
+                               levels = c(1, 2, 3),
+                               labels = c("control", "conservative_AI", "aggressive_AI")))
+
+glmer_hyp_1 <- glmer(Choice_2 ~ Condition + (1|ID), data = df, family = binomial)
+
+summary(glmer_hyp_1)
+
+glmer_hyp_1_2 <- glmer(Choice_2 ~ Condition + std_RT_1 + Choice_1 + Gender + (1|ID) + (1|Situation), data = df, family = binomial, control = glmerControl(optimizer = "bobyqa"))
+
+summary(glmer_hyp_1_2)
+
+```
+```{r}
+conf_df <- df %>%
+  filter(Condition_Name %in% c("aggressive_AI", "conservative_AI")) %>%  # Only AI trials
+  mutate(
+    AI_attack = ifelse(AI_Recommendation == "Attack", 1, 0),
+    # Trial is "confirmation" if AI matches initial choice
+    confirmation = ifelse(Choice_1 == AI_attack, 1, 0)
+  ) %>%
+  filter(confirmation == 1)
+
+cat("Confirmation trials:", nrow(conf_df), "\n")
+
+t.test(conf_df$RT_2, conf_df$RT_1, paired = TRUE)
+
+df_confirmed <- df %>%
+  mutate(RT_diff = RT_2 - RT_1)
+
+shapiro.test(df_confirmed$RT_diff)
+
+# Principle of normality of the variable is violated, so a non-parametric alternative must be used.
+
+wilcox.test(conf_df$RT_2, conf_df$RT_1,
+                            paired = TRUE,
+                            alternative = "two.sided",
+                            exact = FALSE,
+                            conf.int = TRUE)
+
+hist(df_confirmed$RT_diff, breaks=30)
+mean_diff <- mean(df_confirmed$RT_diff, na.rm=TRUE)
+median_diff <- median(df_confirmed$RT_diff, na.rm=TRUE)
+```
+H.2b.0: In trials where AI confirms a participants’ choice, participants will not show significantly different MTs from the first to the second choice. 
+H.2b.1: In trials where AI confirms a participants’ choice, participants will show significantly different MTs from the first to the second choice. Specifically, the MTs show less hesitation. (lower AUC)
+```{r}
+library(dplyr)
+library(stringr)
+
+calculate_auc_short <- function(traj_str) {
+  clean <- gsub("\\[|\\]|\\(|\\)", "", traj_str)
+  vals <- as.numeric(strsplit(clean, ",")[[1]])
+  m <- matrix(vals, ncol = 3, byrow = TRUE)
+  
+  start_idx <- which(!(m[,2] == 0 & m[,3] == -0.5))[1]
+  if(is.na(start_idx)) return(0)
+  
+  m <- m[start_idx:nrow(m), , drop = FALSE]
+  if(nrow(m) < 2) return(0)
+  
+  x <- m[,2]; y <- m[,3]
+  sx <- seq(x[1], x[length(x)], length.out = length(x))
+  sy <- seq(y[1], y[length(y)], length.out = length(y))
+  return(sum(sqrt((x - sx)^2 + (y - sy)^2)))
+}
+
+conf_df <- conf_df %>%
+  mutate(
+    AUC_1 = sapply(Trajectory_1, calculate_auc_short),
+    AUC_2 = sapply(Trajectory_2, calculate_auc_short),
+    AUC_diff = AUC_2 - AUC_1
+  )
+
+cat("=== AUC RESULTS ===\n")
+cat("AUC_1 mean:", mean(conf_df$AUC_1, na.rm=TRUE), "\n")
+cat("AUC_2 mean:", mean(conf_df$AUC_2, na.rm=TRUE), "\n")
+cat("AUC difference mean:", mean(conf_df$AUC_diff, na.rm=TRUE), "\n")
+
+shapiro <- shapiro.test(conf_df$AUC_diff)
+print(shapiro) 
+
+if(shapiro$p.value < 0.05) {
+  cat("Data not normal - use Wilcoxon\n")
+  wilcox <- wilcox.test(conf_df$AUC_2, conf_df$AUC_1, 
+                       paired=TRUE, alternative="two.sided")
+  print(wilcox)
+}
+get_start <- function(traj) {
+  clean <- gsub("\\[|\\]|\\(|\\)", "", traj)
+  vals <- as.numeric(strsplit(clean, ",")[[1]])
+  m <- matrix(vals, ncol=3, byrow=T)
+  start <- which(!(m[,2]==0 & m[,3]==-0.5))[1]
+  return(m[start,1] - m[1,1])
+}
+
+df$before <- sapply(df$Trajectory_1, get_start)
+df$after <- sapply(df$Trajectory_2, get_start)
+df$diff <- df$after - df$before
+
+table(df$Condition_Name)
+
+results <- df %>%
+  group_by(Condition_Name) %>%
+  summarise(
+    mean_before = mean(before, na.rm = TRUE),
+    mean_after = mean(after, na.rm = TRUE),
+    mean_diff = mean_after - mean_before,
+    n = n(),
+    sd_diff = sd(diff, na.rm = TRUE)
+  ) %>%
+  arrange(mean_diff)
+
+print(results)
+
+kruskal_result <- kruskal.test(diff ~ Condition_Name, data = df)
+print(kruskal_result)
+
+if(kruskal_result$p.value < 0.05) {
+  library(FSA)
+  dunn_result <- dunnTest(diff ~ Condition_Name, data = df, method = "bh")
+  print(dunn_result)
+}
+
+boxplot(diff ~ Condition_Name, data = df,
+        names = c("Aggressive AI", "Conservative AI", "Control"),
+        ylab = "Time Increase (After - Before) (s)",
+        main = "Hesitation Increase by AI Type",
+        col = c("red", "blue", "gray"))
+abline(h = 0, lty = 2, col = "darkgray")
+```
+H.3a.0: There will be no difference in mind change rates between AI-confirmation and AI-challenge trials. 
+H.3a.1: Participants will change their minds more frequently when AI challenges their choice than when AI confirms it. 
+
+```{r}
+ai_trials <- df %>%
+  filter(Condition %in% c("aggressive_AI", "conservative_AI")) %>%
+  mutate(
+    trial_type = ifelse(Choice_1  == (AI_Recommendation == "Attack"), 
+                       "confirmation", "challenge"),
+    Changed_Mind = as.numeric(Changed_Mind)
+  )
+
+change_rates <- ai_trials %>%
+  group_by(trial_type) %>%
+  summarise(
+    rate = mean(Changed_Mind) * 100,
+    n = n()
+  )
+print(change_rates)
+
+contingency <- table(ai_trials$trial_type, ai_trials$Changed_Mind)
+chisq.test(contingency)
+
+ggplot(change_rates, aes(x = trial_type, y = rate)) +
+  geom_col() +
+  labs(title = "Mind Change Rates", x = "Trial Type", y = "% Changed Mind")
+```
+H.3b.0: Initial decision hesitation (RTs and MTs) will not predict mind changes when AI challenges choices. 
+H.3b.1: Greater hesitation in the first decision (longer RTs, more complex MTs) will increase the likelihood of switching to AI's recommendation when it challenges the initial choice. 
+```{r}
+challenge_trials <- df %>%
+  filter(Condition %in% c("aggressive_AI", "conservative_AI")) %>%
+  mutate(
+    trial_type = ifelse(Choice_1 == (AI_Recommendation == "Attack"), 
+                       "confirmation", "challenge"),
+    Changed_Mind = as.numeric(Changed_Mind)
+  ) %>%
+  filter(trial_type == "challenge")
+
+challenge_trials <- challenge_trials %>%
+  mutate(
+    AUC_1 = sapply(Trajectory_1, calculate_auc_short)  # Use your AUC function
+  )
+
+model <- glmer(Changed_Mind ~ RT_1 + AUC_1 + Condition_Name + (1|ID), data = challenge_trials, family = binomial)
+
+summary(model)
+```
